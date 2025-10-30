@@ -12,12 +12,14 @@ import (
 	"time"
 )
 
+// tuning these parameters depends on your internet conditions and server capabilities
 var (
-	DefaultMaxConn = 16
-	DialTimeout    = 10 * time.Second
-	PollTimeout    = 2 * time.Millisecond
-	ResolveTimeout = 2 * time.Second
-	IPProtocol     = "ip4"
+	DefaultMaxIdleConn = int32(16)
+	DialTimeout        = 5 * time.Second
+	PollTimeout        = 2 * time.Millisecond
+	ResolveTimeout     = 5 * time.Second
+	ResolveInterval    = 1 * time.Second
+	IPProtocol         = "ip4"
 )
 
 type cConn struct {
@@ -44,13 +46,13 @@ type hPool struct {
 
 type lug struct {
 	mu              sync.RWMutex
-	maxc            int
-	connIdleTimeout time.Duration
-	shutdownTimeout time.Duration
-	readTimeout     time.Duration
-	writeTimeout    time.Duration
 	resolver        *net.Resolver
 	pool            map[string]*hPool
+	maxIdleConn     int32
+	connIdleTimeout time.Duration
+	readTimeout     time.Duration
+	writeTimeout    time.Duration
+	shutdownTimeout time.Duration
 }
 
 // lug is an HTTP transport that maintains a pool of persistent connections to multiple hosts.
@@ -61,17 +63,17 @@ func NewLug(
 	shutdownTimeout time.Duration,
 	readTimeout time.Duration,
 	writeTimeout time.Duration,
-	maxConn int,
+	maxIdleConn int32,
 ) (*lug, func()) {
 	l := &lug{
 		mu:              sync.RWMutex{},
-		maxc:            maxConn,
-		connIdleTimeout: connIdleTimeout,
-		shutdownTimeout: shutdownTimeout,
-		readTimeout:     readTimeout,
-		writeTimeout:    writeTimeout,
 		resolver:        net.DefaultResolver,
 		pool:            make(map[string]*hPool),
+		maxIdleConn:     maxIdleConn,
+		connIdleTimeout: connIdleTimeout,
+		readTimeout:     readTimeout,
+		writeTimeout:    writeTimeout,
+		shutdownTimeout: shutdownTimeout,
 	}
 	return l, l.close
 }
@@ -88,23 +90,28 @@ func (l *lug) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.Header.Set("Connection", "keep-alive")
 
 	var req bytes.Buffer
-	r.Write(&req)
+	r.Write(&req) // nolint
 
 	var res *http.Response
 	con, err, clf := l.getConnection(r.Host)
-	defer clf(err)
 	if err != nil {
+		go clf(err)
 		return nil, err
 	}
+
 	con.SetWriteDeadline(time.Now().Add(l.writeTimeout))
 	_, err = con.Write(req.Bytes())
 	if err != nil {
+		go clf(err)
 		return nil, err
 	}
 	con.SetWriteDeadline(time.Time{})
+
 	con.SetReadDeadline(time.Now().Add(l.readTimeout))
 	res, err = http.ReadResponse(bufio.NewReader(con), r)
 	con.SetReadDeadline(time.Time{})
+	go clf(err)
+
 	return res, err
 }
 
@@ -137,6 +144,7 @@ func (l *lug) newPool(host string) {
 		pool: []*iPool{},
 		host: h,
 		port: p,
+		stop: make(chan struct{}),
 	}
 	go pool.probe()
 	l.pool[host] = pool
@@ -150,7 +158,9 @@ func (p *hPool) close() {
 	wg := sync.WaitGroup{}
 	for _, ip := range p.pool {
 		if ip != nil {
-			wg.Go(ip.close)
+			wg.Go(func() {
+				ip.close(p.l.shutdownTimeout)
+			})
 		}
 	}
 	wg.Wait()
@@ -172,7 +182,7 @@ func (p *hPool) maintainPool() error {
 				np[i] = &iPool{
 					l:    p.l,
 					n:    atomic.Int32{},
-					pool: make(chan cConn, p.l.maxc),
+					pool: make(chan cConn, p.l.maxIdleConn),
 					addr: ips[i].String(),
 				}
 			}
@@ -203,7 +213,7 @@ func (p *hPool) maintainPool() error {
 		p.pool = np
 		for _, xp := range op {
 			if xp != nil {
-				go xp.close()
+				go xp.close(p.l.shutdownTimeout)
 			}
 		}
 	}
@@ -215,40 +225,41 @@ func (p *hPool) probe() {
 		select {
 		case <-p.stop:
 			return
-		case <-time.After(1 * time.Second):
+		case <-time.After(ResolveInterval):
 			p.maintainPool()
 		}
 	}
 }
 
 func (p *hPool) moveLoc() {
-	p.mu.RLock()
-	nloc := p.loc + 1
-	if nloc >= len(p.pool) {
-		nloc = 0
+	if p.mu.TryRLock() {
+		nloc := p.loc + 1
+		if nloc >= len(p.pool) {
+			nloc = 0
+		}
+		if p.pool[nloc].n.Load() <= p.pool[p.loc].n.Load() {
+			p.loc = nloc
+		}
+		p.mu.RUnlock()
 	}
-	if p.pool[nloc].n.Load() <= p.pool[p.loc].n.Load() {
-		p.loc = nloc
-	}
-	p.mu.RUnlock()
 }
 
 func (p *hPool) getConnection() (net.Conn, error, func(error)) {
 	if len(p.pool) > 0 {
 		con, err, fun := p.pool[p.loc].getConnection(p.port)
-		go p.moveLoc()
+		p.moveLoc()
 		return con, err, fun
 	}
 	if err := p.maintainPool(); err != nil {
 		return nil, err, func(error) {}
 	}
 	con, err, fun := p.pool[p.loc].getConnection(p.port)
-	go p.moveLoc()
+	p.moveLoc()
 	return con, err, fun
 }
 
-func (p *iPool) close() {
-	ctx, cancel := context.WithTimeout(context.Background(), p.l.shutdownTimeout)
+func (p *iPool) close(timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	ch := make(chan struct{})
 	go func() {
@@ -266,58 +277,52 @@ func (p *iPool) close() {
 	}
 	go func() {
 		defer func() {
+			// it's better find a better way to handle closed channel
 			recover()
 		}()
 		close(p.pool)
 	}()
 }
 
+func (p *iPool) put(c net.Conn) func(error) {
+	return func(e error) {
+		defer func() {
+			// it's better find a better way to handle closed channel
+			recover()
+		}()
+		if p.n.Load() < p.l.maxIdleConn && e == nil {
+			p.pool <- cConn{c: c, t: time.Now()}
+			p.n.Add(-1)
+			return
+		}
+		c.Close()
+		p.n.Add(-1)
+	}
+}
+
 func (p *iPool) getConnection(port string) (net.Conn, error, func(error)) {
 	p.n.Add(1)
 	con, ok := p.poll()
 	if ok {
-		return con, nil, func(e error) {
-			p.n.Add(-1)
-			if e == nil && len(p.pool) < p.l.maxc {
-				p.pool <- cConn{c: con, t: time.Now()}
-			}
-		}
+		return con, nil, p.put(con)
 	}
 	con, err := net.DialTimeout("tcp", p.addr+port, DialTimeout)
 	if err != nil {
 		return nil, err, func(error) {
+			p.n.Add(-1)
 		}
 	}
-	return con, nil, func(e error) {
-		p.n.Add(-1)
-		if e == nil && len(p.pool) < p.l.maxc {
-			p.pool <- cConn{c: con, t: time.Now()}
-		} else {
-			con.Close()
-		}
-	}
-}
-
-func (p *iPool) waitTimout() time.Duration {
-	if p.n.Load() < int32(p.l.maxc) {
-		return PollTimeout
-	}
-	return PollTimeout + time.Duration(p.n.Load())*time.Millisecond
+	return con, nil, p.put(con)
 }
 
 func (p *iPool) poll() (net.Conn, bool) {
-	ctx, cxl := context.WithTimeout(context.Background(), p.waitTimout())
-	defer cxl()
-	for {
-		select {
-		case cx := <-p.pool:
-			if time.Since(cx.t) < p.l.connIdleTimeout {
-				return cx.c, true
-			} else {
-				cx.c.Close()
-			}
-		case <-ctx.Done():
-			return nil, false
+	for len(p.pool) > 0 {
+		cx := <-p.pool
+		if time.Since(cx.t) < p.l.connIdleTimeout {
+			return cx.c, true
+		} else {
+			cx.c.Close()
 		}
 	}
+	return nil, false
 }

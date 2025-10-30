@@ -23,7 +23,7 @@ func TestNewLug(t *testing.T) {
 		shutdownTimeout time.Duration
 		readTimeout     time.Duration
 		writeTimeout    time.Duration
-		maxConn         int
+		maxIdleConn     int32
 	}{
 		{
 			name:            "default settings",
@@ -31,7 +31,7 @@ func TestNewLug(t *testing.T) {
 			shutdownTimeout: 5 * time.Second,
 			readTimeout:     0,
 			writeTimeout:    0,
-			maxConn:         16,
+			maxIdleConn:     DefaultMaxIdleConn,
 		},
 		{
 			name:            "custom settings",
@@ -39,20 +39,20 @@ func TestNewLug(t *testing.T) {
 			shutdownTimeout: 2 * time.Second,
 			readTimeout:     3 * time.Second,
 			writeTimeout:    4 * time.Second,
-			maxConn:         8,
+			maxIdleConn:     8,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			l, close := NewLug(tt.connIdleTimeout, tt.shutdownTimeout, tt.readTimeout, tt.writeTimeout, tt.maxConn)
+			l, close := NewLug(tt.connIdleTimeout, tt.shutdownTimeout, tt.readTimeout, tt.writeTimeout, tt.maxIdleConn)
 			defer close()
 
 			if l == nil {
 				t.Fatal("NewLug returned nil")
 			}
-			if l.maxc != tt.maxConn {
-				t.Errorf("maxc = %d, want %d", l.maxc, tt.maxConn)
+			if l.maxIdleConn != tt.maxIdleConn {
+				t.Errorf("maxc = %d, want %d", l.maxIdleConn, tt.maxIdleConn)
 			}
 			if l.connIdleTimeout != tt.connIdleTimeout {
 				t.Errorf("connIdleTimeout = %v, want %v", l.connIdleTimeout, tt.connIdleTimeout)
@@ -80,7 +80,7 @@ func TestRoundTrip(t *testing.T) {
 	}))
 	defer server.Close()
 
-	l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxConn)
+	l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxIdleConn)
 	defer close()
 
 	req, err := http.NewRequest("GET", server.URL, nil)
@@ -137,7 +137,7 @@ func TestRoundTripErros(t *testing.T) {
 		go func() {
 			con, err := lp.Accept()
 			if err != nil {
-				t.Fatalf("Failed to accept dummy connection: %v", err)
+				panic(err)
 			}
 			buf := make([]byte, 4096)
 			con.Read(buf)
@@ -165,7 +165,7 @@ func TestRoundTripMultipleRequests(t *testing.T) {
 	}))
 	defer server.Close()
 
-	l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxConn)
+	l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxIdleConn)
 	defer close()
 
 	// Make multiple requests to test connection reuse
@@ -201,7 +201,7 @@ func TestRoundTripConcurrent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	l, close := NewLug(30*time.Second, 5*time.Second, 500*time.Millisecond, 500*time.Millisecond, DefaultMaxConn)
+	l, close := NewLug(30*time.Second, 5*time.Second, 500*time.Millisecond, 500*time.Millisecond, DefaultMaxIdleConn)
 	defer close()
 
 	wg := sync.WaitGroup{}
@@ -230,7 +230,7 @@ func TestRoundTripConcurrent(t *testing.T) {
 
 func TestNewPool(t *testing.T) {
 	t.Run("simple", func(t *testing.T) {
-		l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxConn)
+		l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxIdleConn)
 		defer close()
 
 		host := "example.com:80"
@@ -252,7 +252,7 @@ func TestNewPool(t *testing.T) {
 	})
 
 	t.Run("default port", func(t *testing.T) {
-		l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxConn)
+		l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxIdleConn)
 		defer close()
 
 		host := "example.com"
@@ -274,7 +274,7 @@ func TestNewPool(t *testing.T) {
 	})
 
 	t.Run("no duplicate", func(t *testing.T) {
-		l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxConn)
+		l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxIdleConn)
 		defer close()
 
 		host := "example.com:8080"
@@ -290,7 +290,7 @@ func TestNewPool(t *testing.T) {
 	})
 
 	t.Run("concurrent safe", func(t *testing.T) {
-		l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxConn)
+		l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxIdleConn)
 		defer close()
 
 		concurrent := 1000
@@ -376,32 +376,6 @@ func TestHPoolMaintainPool(t *testing.T) {
 	})
 }
 
-func TestIPoolWaitTimeout(t *testing.T) {
-	l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, 10)
-	defer close()
-
-	pool := &iPool{
-		l:    l,
-		pool: make(chan cConn, l.maxc),
-		addr: "127.0.0.1",
-	}
-
-	// Test with low load
-	pool.n.Store(5)
-	timeout := pool.waitTimout()
-	if timeout != PollTimeout {
-		t.Errorf("waitTimout with low load = %v, want %v", timeout, PollTimeout)
-	}
-
-	// Test with high load
-	pool.n.Store(15)
-	timeout = pool.waitTimout()
-	expected := PollTimeout + 15*time.Millisecond
-	if timeout != expected {
-		t.Errorf("waitTimout with high load = %v, want %v", timeout, expected)
-	}
-}
-
 func TestConnectionIdleTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -410,7 +384,7 @@ func TestConnectionIdleTimeout(t *testing.T) {
 	defer server.Close()
 
 	// Create lug with very short idle timeout
-	l, close := NewLug(100*time.Millisecond, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxConn)
+	l, close := NewLug(100*time.Millisecond, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxIdleConn)
 	defer close()
 
 	// Make first request
@@ -438,7 +412,7 @@ func TestConnectionIdleTimeout(t *testing.T) {
 }
 
 func TestClose(t *testing.T) {
-	l, clf := NewLug(30*time.Second, 1*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxConn)
+	l, clf := NewLug(30*time.Second, 1*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxIdleConn)
 
 	// Create a pool
 	l.newPool("example.com:80")
@@ -589,7 +563,7 @@ func TestIPoolConnectionCloseFunction(t *testing.T) {
 	}
 	_, err, cl := ipool.getConnection(fmt.Sprintf(":%d", sa.Port))
 	cl(errors.New("fake error"))
-	ipool.close()
+	ipool.close(50 * time.Microsecond)
 }
 
 func TestRoundTripWithHTTPClient(t *testing.T) {
@@ -601,7 +575,7 @@ func TestRoundTripWithHTTPClient(t *testing.T) {
 	}))
 	defer server.Close()
 
-	l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxConn)
+	l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxIdleConn)
 	defer close()
 
 	client := &http.Client{

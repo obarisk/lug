@@ -21,7 +21,7 @@ func BenchmarkLugTransport(b *testing.B) {
 	hs := &http.Server{Handler: mu, Addr: sl.Addr().String()}
 	go func() {
 		if err := hs.Serve(sl); err != nil && err != http.ErrServerClosed {
-			b.Fatal(err)
+			panic(err)
 		}
 	}()
 
@@ -30,7 +30,7 @@ func BenchmarkLugTransport(b *testing.B) {
 		5*time.Second,
 		500*time.Millisecond,
 		500*time.Millisecond,
-		20)
+		DefaultMaxIdleConn)
 	defer clf()
 	hc := http.Client{Transport: lt}
 	okCnt := 0
@@ -66,7 +66,7 @@ func BenchmarkDefaultTransport(b *testing.B) {
 	hs := &http.Server{Handler: mu, Addr: sl.Addr().String()}
 	go func() {
 		if err := hs.Serve(sl); err != nil && err != http.ErrServerClosed {
-			b.Fatal(err)
+			panic(err)
 		}
 	}()
 
