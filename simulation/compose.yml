@@ -1,0 +1,19 @@
+services:
+  okserver:
+    image: alpine:latest
+    volumes:
+      - ./okserver/okserver:/okserver
+    command: /okserver
+
+  httpclient:
+    image: alpine:latest
+    volumes:
+      - ./httpclient/client:/client
+    command: [sleep, infinity]
+
+  lugclient:
+    image: golang:alpine
+    volumes:
+      - ../:/app
+    working_dir: /app/simulation
+    command: [sleep, infinity]
