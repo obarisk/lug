@@ -572,7 +572,7 @@ func TestIPoolConnectionCloseFunction(t *testing.T) {
 	}
 	_, err, cl := ipool.getConnection(fmt.Sprintf(":%d", sa.Port))
 	cl(errors.New("fake error"))
-	ipool.close(50 * time.Microsecond)
+	ipool.close()
 }
 
 func TestRoundTripWithHTTPClient(t *testing.T) {

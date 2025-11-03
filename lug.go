@@ -158,9 +158,7 @@ func (p *hPool) close() {
 	wg := sync.WaitGroup{}
 	for _, ip := range p.pool {
 		if ip != nil {
-			wg.Go(func() {
-				ip.close(p.l.shutdownTimeout)
-			})
+			wg.Go(ip.close)
 		}
 	}
 	wg.Wait()
@@ -216,7 +214,7 @@ func (p *hPool) maintainPool() error {
 		p.pool = np
 		for _, xp := range op {
 			if xp != nil {
-				go xp.close(p.l.shutdownTimeout)
+				go xp.close()
 			}
 		}
 	}
@@ -268,8 +266,8 @@ func (p *hPool) getConnection() (net.Conn, error, func(error)) {
 	return con, err, fun
 }
 
-func (p *iPool) close(timeout time.Duration) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func (p *iPool) close() {
+	ctx, cancel := context.WithTimeout(context.Background(), p.l.shutdownTimeout)
 	defer cancel()
 	ch := make(chan struct{})
 	go func() {

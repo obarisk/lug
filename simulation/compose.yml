@@ -5,12 +5,6 @@ services:
       - ./okserver/okserver:/okserver
     command: /okserver
 
-  httpclient:
-    image: alpine:latest
-    volumes:
-      - ./httpclient/client:/client
-    command: [sleep, infinity]
-
   lugclient:
     image: golang:alpine
     volumes:
