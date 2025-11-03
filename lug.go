@@ -202,6 +202,9 @@ func (p *hPool) maintainPool() error {
 					break
 				}
 			}
+			if np[i] != nil {
+				continue
+			}
 			np[i] = &iPool{
 				l:    p.l,
 				n:    atomic.Int32{},
@@ -233,12 +236,19 @@ func (p *hPool) probe() {
 
 func (p *hPool) moveLoc() {
 	if p.mu.TryRLock() {
-		nloc := p.loc + 1
+		ploc, nloc := p.loc-1, p.loc+1
 		if nloc >= len(p.pool) {
 			nloc = 0
 		}
-		if p.pool[nloc].n.Load() <= p.pool[p.loc].n.Load() {
-			p.loc = nloc
+		if ploc < 0 {
+			ploc = len(p.pool) - 1
+		}
+		xloc := nloc
+		if p.pool[ploc].n.Load() < p.pool[nloc].n.Load() {
+			xloc = ploc
+		}
+		if p.pool[xloc].n.Load() <= p.pool[p.loc].n.Load() {
+			p.loc = xloc
 		}
 		p.mu.RUnlock()
 	}

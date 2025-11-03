@@ -43,7 +43,7 @@ func ips(name dnsmessage.Name) []dnsmessage.Resource {
 	}
 	rs := []dnsmessage.Resource{v0}
 	n := rand.Intn(5)
-	for i := 0; i < n; i++ {
+	for i := 0; i <= n; i++ {
 		vx := dnsmessage.Resource{
 			Header: v0.Header,
 			Body: &dnsmessage.AResource{

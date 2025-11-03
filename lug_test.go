@@ -339,7 +339,7 @@ func TestHPoolMaintainPool(t *testing.T) {
 	go pool.probe()
 
 	wg := sync.WaitGroup{}
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 10; i++ {
 		wg.Go(func() {
 			if err := pool.maintainPool(); err != nil {
 				t.Fatalf("maintainPool error: %v", err)
@@ -428,15 +428,9 @@ func TestHPoolMoveLoc(t *testing.T) {
 	l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, 4)
 	defer close()
 
-	// Create test pools with different load levels
 	pool1 := &iPool{l: l, pool: make(chan cConn, 4), addr: "127.0.0.1"}
 	pool2 := &iPool{l: l, pool: make(chan cConn, 4), addr: "127.0.0.2"}
 	pool3 := &iPool{l: l, pool: make(chan cConn, 4), addr: "127.0.0.3"}
-
-	pool1.n.Store(5)
-	pool2.n.Store(2)
-	pool3.n.Store(8)
-
 	hpool := &hPool{
 		l:    l,
 		mu:   sync.RWMutex{},
@@ -446,12 +440,27 @@ func TestHPoolMoveLoc(t *testing.T) {
 		port: ":80",
 	}
 
-	// Move from pool1 (load=5) to pool2 (load=2)
-	hpool.moveLoc()
+	cases := []struct {
+		p1n  int32
+		p2n  int32
+		p3n  int32
+		oloc int
+		nloc int
+	}{
+		{0, 0, 0, 0, 1}, // all equal, move to next
+		{1, 0, 0, 0, 1}, // -1, 1 are equal, move to 1
+		{1, 1, 0, 0, 2}, // -1 is smaller, move to -1(=2)
+	}
+	for _, c := range cases {
+		pool1.n.Store(c.p1n)
+		pool2.n.Store(c.p2n)
+		pool3.n.Store(c.p3n)
 
-	// Location should move to pool2 since it has less load
-	if hpool.loc != 1 {
-		t.Errorf("loc = %d, want 1 (should move to pool with lower load)", hpool.loc)
+		hpool.loc = int(c.oloc)
+		hpool.moveLoc()
+		if hpool.loc != c.nloc {
+			t.Errorf("loc = %d, want %d (should move to pool with lower load)", hpool.loc, c.nloc)
+		}
 	}
 }
 
