@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
@@ -14,12 +15,13 @@ import (
 
 // tuning these parameters depends on your internet conditions and server capabilities
 var (
-	DefaultMaxIdleConn = int32(16)
-	DialTimeout        = 5 * time.Second
-	PollTimeout        = 2 * time.Millisecond
-	ResolveTimeout     = 5 * time.Second
-	ResolveInterval    = 1 * time.Second
-	IPProtocol         = "ip4"
+	DefaultMaxIdleConn  = int32(16)
+	DialTimeout         = 5 * time.Second
+	PollTimeout         = 2 * time.Millisecond
+	ResolveTimeout      = 5 * time.Second
+	ResolveInterval     = 1 * time.Second
+	IPProtocol          = "ip4"
+	errClosedConnection = errors.New("closed connection")
 )
 
 type cConn struct {
@@ -110,7 +112,11 @@ func (l *lug) RoundTrip(r *http.Request) (*http.Response, error) {
 	con.SetReadDeadline(time.Now().Add(l.readTimeout))
 	res, err = http.ReadResponse(bufio.NewReader(con), r)
 	con.SetReadDeadline(time.Time{})
-	go clf(err)
+	if res.Close {
+		go clf(errClosedConnection)
+	} else {
+		go clf(err)
+	}
 
 	return res, err
 }

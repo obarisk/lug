@@ -228,6 +228,38 @@ func TestRoundTripConcurrent(t *testing.T) {
 	}
 }
 
+func TestRoundTripToServerDisableKeepAlive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(10 * time.Millisecond)
+		w.Header().Set("Connection", "close")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	}))
+	defer server.Close()
+
+	l, close := NewLug(3*time.Second, 1*time.Second, 500*time.Millisecond, 500*time.Millisecond, DefaultMaxIdleConn)
+	defer close()
+
+	wg := sync.WaitGroup{}
+	for i := 0; i < 100; i++ {
+		wg.Go(func() {
+			req, err := http.NewRequest("GET", server.URL, nil)
+			if err != nil {
+				t.Fatalf("Concurrent request: Failed to create request: %v", err)
+			}
+			resp, err := l.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("Concurrent request: RoundTrip failed: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("Concurrent request: StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+		})
+	}
+	wg.Wait()
+}
+
 func TestNewPool(t *testing.T) {
 	t.Run("simple", func(t *testing.T) {
 		l, close := NewLug(30*time.Second, 5*time.Second, 50*time.Millisecond, 50*time.Millisecond, DefaultMaxIdleConn)
